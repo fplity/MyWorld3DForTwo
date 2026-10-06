@@ -52,8 +52,9 @@ public final class Player {
             velocityY = ((input.isDown(KeyEvent.VK_SPACE) ? 1 : 0) -
                     (input.isDown(KeyEvent.VK_SHIFT) ? 1 : 0)) * speed;
         } else {
-            if (input.consumePressed(KeyEvent.VK_SPACE) && (grounded || inWater))
-                velocityY = inWater ? 5.0 : 7.35;
+            boolean jump = input.consumePressed(KeyEvent.VK_SPACE);
+            if (inWater && input.isDown(KeyEvent.VK_SPACE)) velocityY = 4.2;
+            else if (jump && grounded) velocityY = 7.35;
             velocityY -= (inWater ? 5.5 : 20.5) * dt;
             velocityY = Math.max(velocityY, -24.0);
         }
@@ -64,6 +65,7 @@ public final class Player {
         moveAxis(world, 0, 0, velocityZ * dt);
         x = Math.max(1.3, Math.min(world.width - 1.3, x));
         z = Math.max(1.3, Math.min(world.depth - 1.3, z));
+        if (flying) y = Math.min(world.height + 32, y);
     }
 
     private void moveAxis(World world, double dx, double dy, double dz) {

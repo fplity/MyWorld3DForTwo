@@ -22,6 +22,7 @@ public final class Recipe {
 
     public boolean canCraft(Inventory inventory, Player player) {
         if (toolTier > 0 && player.toolTier >= toolTier) return false;
+        if (output != null && inventory.count(output) - costs[output.id] + outputAmount > Inventory.MAX_COUNT) return false;
         for (Block block : Block.values()) if (inventory.count(block) < costs[block.id]) return false;
         return true;
     }

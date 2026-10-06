@@ -14,19 +14,20 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Random;
+import java.util.concurrent.locks.LockSupport;
 
 /** Main loop, gameplay rules, menus, HUD, and integration of all game systems. */
 public final class Game extends Canvas implements Runnable {
     private enum Screen { MENU, PLAYING, INVENTORY, PAUSED }
     private static final int VIEW_ASPECT_W = 16, VIEW_ASPECT_H = 9;
-    private static final Path SAVE_FILE = Path.of("saves", "world.mw3d");
+    private final Path saveFile;
     private static final Font TITLE_FONT = new Font("Microsoft YaHei", Font.BOLD, 54);
     private static final Font LARGE_FONT = new Font("Microsoft YaHei", Font.BOLD, 25);
     private static final Font UI_FONT = new Font("Microsoft YaHei", Font.PLAIN, 16);
     private static final Font SMALL_FONT = new Font("Microsoft YaHei", Font.PLAIN, 13);
 
     private final Input input;
-    private final Random events;
+    private Random events;
     private World world;
     private Player player;
     private Inventory inventory;
@@ -50,8 +51,14 @@ public final class Game extends Canvas implements Runnable {
     private String toast = "";
     private double toastTimer;
     private int fps;
+    private boolean savingEnabled = true;
+    private boolean worldOpened;
+    private boolean sceneDirty = true;
 
-    public Game() {
+    public Game() { this(Path.of("saves", "world.mw3d")); }
+
+    public Game(Path saveFile) {
+        this.saveFile = saveFile;
         setPreferredSize(new Dimension(1280, 720));
         setIgnoreRepaint(true);
         loadOrCreateWorld();
@@ -60,25 +67,34 @@ public final class Game extends Canvas implements Runnable {
     }
 
     private void loadOrCreateWorld() {
-        if (Files.isRegularFile(SAVE_FILE)) {
+        if (Files.isRegularFile(saveFile)) {
             try {
-                SaveSystem.Snapshot saved = SaveSystem.load(SAVE_FILE);
-                world = saved.world;
-                player = new Player(saved.x, saved.y, saved.z);
-                player.yaw = saved.yaw; player.pitch = saved.pitch; player.health = saved.health;
-                player.toolTier = saved.toolTier; player.flying = saved.flying;
-                inventory = new Inventory(false); inventory.replaceCounts(saved.counts); inventory.selected = saved.selected;
-                timeOfDay = saved.timeOfDay; rainy = saved.rainy; secretFound = saved.secretFound;
-                loadedSave = true;
-            } catch (Exception e) {
-                Path broken = SAVE_FILE.resolveSibling("world-broken-" + System.currentTimeMillis() + ".mw3d");
-                try { Files.move(SAVE_FILE, broken); } catch (IOException ignored) {}
-                createWorld();
-                toast = "旧存档无法读取，已备份并创建新世界"; toastTimer = 8;
+                applySnapshot(SaveSystem.load(saveFile));
+            } catch (IOException e) {
+                Path broken = saveFile.resolveSibling("world-broken-" + System.currentTimeMillis() + ".mw3d");
+                try { Files.move(saveFile, broken); }
+                catch (IOException preserveFailure) { savingEnabled=false; }
+                try {
+                    applySnapshot(SaveSystem.load(SaveSystem.backupPath(saveFile)));
+                    toast="主存档异常，已从上一份有效备份恢复";
+                } catch (IOException unavailableBackup) {
+                    createWorld();
+                    toast=savingEnabled?"损坏存档已保留，创建了新世界":"原存档无法备份，已禁止保存以保护原文件";
+                }
+                toastTimer=8;
             }
         } else createWorld();
         renderer = new Renderer(world);
         entities = new EntitySystem(world, secretFound);
+    }
+
+    private void applySnapshot(SaveSystem.Snapshot saved) {
+        world=saved.world;
+        player=new Player(saved.x,saved.y,saved.z);
+        player.yaw=saved.yaw;player.pitch=saved.pitch;player.health=saved.health;
+        player.toolTier=saved.toolTier;player.flying=saved.flying;
+        inventory=new Inventory(false);inventory.replaceCounts(saved.counts);inventory.selected=saved.selected;
+        timeOfDay=saved.timeOfDay;rainy=saved.rainy;secretFound=saved.secretFound;loadedSave=true;
     }
 
     private void createWorld() {
@@ -100,31 +116,37 @@ public final class Game extends Canvas implements Runnable {
     public void shutdown() {
         running = false;
         if (loopThread != null && Thread.currentThread() != loopThread) {
-            try { loopThread.join(1200); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-        }
-        saveQuietly(false);
+            try { loopThread.join(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        } else if(loopThread==null && worldOpened) saveQuietly(false);
     }
 
     @Override public void run() {
         requestFocusInWindow();
         long previous = System.nanoTime(), fpsClock = previous;
         int frames = 0;
-        while (running) {
+        double accumulator=0;
+        final double step=1.0/120.0;
+        try { while (running) {
             long now = System.nanoTime();
-            double dt = Math.min(0.05, (now - previous) / 1_000_000_000.0);
+            double dt = Math.min(0.25, (now - previous) / 1_000_000_000.0);
             previous = now;
-            update(dt);
+            accumulator += dt;
+            while(accumulator>=step && running) { update(step); accumulator-=step; }
             renderFrame();
             frames++;
             if (now - fpsClock >= 1_000_000_000L) { fps = frames; frames = 0; fpsClock = now; }
-            try { Thread.sleep(1); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
-        }
+            long remaining=16_666_667L-(System.nanoTime()-now);
+            if(remaining>0)LockSupport.parkNanos(remaining);
+        }} finally { if(worldOpened)saveQuietly(false); }
     }
 
     private void update(double dt) {
         toastTimer = Math.max(0, toastTimer - dt);
         secretGlow = Math.max(0, secretGlow - dt);
         attackCooldown = Math.max(0, attackCooldown - dt);
+        if (input.consumeFocusLost() && screen == Screen.PLAYING) {
+            screen=Screen.PAUSED; input.setCaptured(false); return;
+        }
 
         if (screen == Screen.MENU) {
             if (input.consumePressed(KeyEvent.VK_ENTER)) enterGame();
@@ -136,12 +158,17 @@ public final class Game extends Canvas implements Runnable {
             else { screen = Screen.PLAYING; input.setCaptured(true); }
             return;
         }
+        if (input.consumePressed(KeyEvent.VK_F5)) saveQuietly(true);
         if (screen == Screen.PAUSED) {
             if (input.consumePressed(KeyEvent.VK_ENTER)) enterGame();
             return;
         }
         if (screen == Screen.INVENTORY) {
             updateInventory();
+            return;
+        }
+        if (!input.isCaptured()) {
+            if(input.consumeMousePressed(1))input.setCaptured(true);
             return;
         }
 
@@ -156,8 +183,7 @@ public final class Game extends Canvas implements Runnable {
         if (input.consumePressed(KeyEvent.VK_Y)) {
             rainy = !rainy; weatherTimer = 40; announce(rainy ? "雨云正在聚拢" : "天空放晴了");
         }
-        if (input.consumePressed(KeyEvent.VK_F5)) saveQuietly(true);
-        for (int i = 0; i < 9; i++) if (input.consumePressed(KeyEvent.VK_1 + i)) inventory.selected = i;
+        for (int i = 0; i < 9; i++) if (input.consumePressed(KeyEvent.VK_1 + i)) inventory.selectHotbarSlot(i);
         int wheel = input.consumeWheel(); if (wheel != 0) inventory.scroll(wheel);
 
         player.update(world, input, dt);
@@ -171,7 +197,7 @@ public final class Game extends Canvas implements Runnable {
         autosaveTimer -= dt;
         if (autosaveTimer <= 0) { saveQuietly(false); autosaveTimer = 30; }
 
-        world.cast(player.x, player.cameraY(), player.z, player.lookX(), player.lookY(), player.lookZ(), 6.0, target);
+        world.castIgnoringLiquids(player.x, player.cameraY(), player.z, player.lookX(), player.lookY(), player.lookZ(), 6.0, target);
         updateMiningAndBuilding(dt);
         entities.update(world, player, timeOfDay, rainy, dt);
         checkShrine();
@@ -194,15 +220,20 @@ public final class Game extends Canvas implements Runnable {
     }
 
     private void updateMiningAndBuilding(double dt) {
-        if (input.consumeMousePressed(1) && attackCooldown <= 0) {
+        boolean attackPressed=input.consumeMousePressed(1);
+        if (attackPressed || input.isMouseDown(1)) {
             Creature aimed = entities.aimedCreature(world, player, 5.0);
-            if (entities.attack(aimed, inventory)) {
-                attackCooldown = .32; miningProgress = 0;
-                announce(aimed.health <= 0 ? "史莱姆化成了一小团矿物微光" : "击中了史莱姆");
+            if(aimed!=null) {
+                if(attackCooldown<=0 && entities.attack(aimed,inventory)) {
+                    attackCooldown=.32;
+                    announce(aimed.health<=0?"史莱姆化成了一小团矿物微光":"击中了史莱姆");
+                }
+                miningProgress=0;
                 return;
             }
         }
-        if (input.isMouseDown(1) && target.hit && target.block.hardness > 0 && target.block != Block.WATER) {
+        if (input.isMouseDown(1) && target.hit && target.y > 0 && world.inBounds(target.x,target.y,target.z)
+                && target.block.hardness > 0 && target.block != Block.WATER) {
             if (miningX != target.x || miningY != target.y || miningZ != target.z) {
                 miningX = target.x; miningY = target.y; miningZ = target.z; miningProgress = 0;
             }
@@ -243,26 +274,32 @@ public final class Game extends Canvas implements Runnable {
             entities.unlockCompanion(x,y,z);
             inventory.add(Block.GLOW, 6);
             player.heal(20);
-            announce("✨ 你唤醒了「露米」！它会跟随并治疗你 ✨");
+            announce("你唤醒了「露米」！它会跟随并治疗你");
             java.awt.Toolkit.getDefaultToolkit().beep();
         }
     }
 
-    private void enterGame() { screen = Screen.PLAYING; input.setCaptured(true); }
+    private void enterGame() { screen = Screen.PLAYING; worldOpened=true; input.setCaptured(true); sceneDirty=true; }
     private void startFreshWorld() {
+        try { SaveSystem.archiveBeforeNewWorld(saveFile); }
+        catch(IOException e) { announce("原世界备份失败，已取消新建："+e.getMessage()); return; }
         createWorld();
         renderer = new Renderer(world);
         entities = new EntitySystem(world, false);
         timeOfDay = .23; rainy = false; secretFound = false; shrineHintShown = false;
         loadedSave = false;
+        events=new Random(world.seed ^ 0xBEEFBEEFL);
+        miningProgress=0;miningX=Integer.MIN_VALUE;target.clear(6);secretGlow=0;
+        attackCooldown=0;autosaveTimer=30;weatherTimer=28;
         announce("新的世界已经生成");
         enterGame();
     }
     private void announce(String text) { toast = text; toastTimer = 4.5; }
 
     private synchronized void saveQuietly(boolean notify) {
+        if(!savingEnabled) { if(notify)announce("为保护原存档，保存当前不可用"); return; }
         try {
-            SaveSystem.save(SAVE_FILE, world, player, inventory, timeOfDay, rainy, secretFound);
+            SaveSystem.save(saveFile, world, player, inventory, timeOfDay, rainy, secretFound);
             if (notify) announce("世界已保存");
         } catch (IOException e) {
             announce("保存失败：" + e.getMessage());
@@ -273,7 +310,10 @@ public final class Game extends Canvas implements Runnable {
         if (!isDisplayable()) return;
         BufferStrategy strategy = getBufferStrategy();
         if (strategy == null) { createBufferStrategy(2); return; }
-        renderer.render(player, timeOfDay, rainy, target, entities.creatures(), secretGlow);
+        if(screen==Screen.PLAYING || sceneDirty) {
+            renderer.render(player, timeOfDay, rainy, target, entities.creatures(), secretGlow);
+            sceneDirty=false;
+        }
         do {
             do {
                 Graphics2D g = (Graphics2D) strategy.getDrawGraphics();
@@ -315,10 +355,12 @@ public final class Game extends Canvas implements Runnable {
 
         int slots=9, slot=52, start=cx-slots*slot/2;
         for(int i=0;i<slots;i++){
-            int paletteIndex=Math.floorMod(inventory.selected-4+i,Block.BUILD_PALETTE.length);
-            Block block=Block.BUILD_PALETTE[paletteIndex]; int x=start+i*slot,y=vy+h-68;
-            g.setColor(new Color(15,20,28,i==4?225:175));g.fillRoundRect(x,y,47,47,8,8);
-            g.setColor(i==4?new Color(255,229,120):new Color(255,255,255,110));g.setStroke(new BasicStroke(i==4?3:1));g.drawRoundRect(x,y,47,47,8,8);
+            Block block=inventory.hotbarBlock(i); int x=start+i*slot,y=vy+h-68;
+            boolean selected=i==inventory.selected-inventory.hotbarStart();
+            g.setColor(new Color(15,20,28,selected?225:175));g.fillRoundRect(x,y,47,47,8,8);
+            g.setColor(selected?new Color(255,229,120):new Color(255,255,255,110));g.setStroke(new BasicStroke(selected?3:1));g.drawRoundRect(x,y,47,47,8,8);
+            g.setFont(SMALL_FONT);shadowText(g,String.valueOf(i+1),x+3,y+13,Color.WHITE);
+            if(block==null)continue;
             g.setColor(new Color(block.color));g.fillRect(x+12,y+9,23,23);g.setColor(new Color(255,255,255,90));g.drawLine(x+12,y+9,x+34,y+9);
             g.setFont(SMALL_FONT);shadowText(g,String.valueOf(inventory.count(block)),x+28,y+43,Color.WHITE);
         }
@@ -366,11 +408,12 @@ public final class Game extends Canvas implements Runnable {
             shadowText(g,block.displayName,x+36,y-7,Color.WHITE);shadowText(g,"×"+inventory.count(block),x+36,y+12,new Color(190,205,220));shown++;
         }
         int rx=px+panelW/2+20,ry=py+78;
+        int recipeRow=(panelH-125)/inventory.recipes().size();
         for(int i=0;i<inventory.recipes().size();i++){
             Recipe recipe=inventory.recipes().get(i);boolean selected=i==inventory.selectedRecipe;
-            if(selected){g.setColor(new Color(77,111,137,190));g.fillRoundRect(rx-8,ry+i*56-23,panelW/2-45,50,10,10);}
-            g.setFont(UI_FONT);shadowText(g,(selected?"▶ ":"  ")+recipe.name,rx,ry+i*56,recipe.canCraft(inventory,player)?new Color(151,240,181):new Color(210,210,210));
-            g.setFont(SMALL_FONT);shadowText(g,recipe.requirementText(),rx+20,ry+i*56+20,new Color(173,188,203));
+            if(selected){g.setColor(new Color(77,111,137,190));g.fillRoundRect(rx-8,ry+i*recipeRow-23,panelW/2-45,recipeRow-2,10,10);}
+            g.setFont(UI_FONT);shadowText(g,(selected?"> ":"  ")+recipe.name,rx,ry+i*recipeRow,recipe.canCraft(inventory,player)?new Color(151,240,181):new Color(210,210,210));
+            g.setFont(SMALL_FONT);shadowText(g,recipe.requirementText(),rx+20,ry+i*recipeRow+20,new Color(173,188,203));
         }
         drawCentered(g,"↑/↓ 选择 · Enter 合成 · E 返回游戏",px+panelW/2,py+panelH-23,UI_FONT,new Color(255,230,150));
     }

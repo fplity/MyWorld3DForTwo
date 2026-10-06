@@ -4,6 +4,7 @@ import javax.swing.SwingUtilities;
 import java.awt.AWTException;
 import java.awt.Canvas;
 import java.awt.Cursor;
+import java.awt.GraphicsEnvironment;
 import java.awt.Point;
 import java.awt.Robot;
 import java.awt.Toolkit;
@@ -29,16 +30,22 @@ public final class Input implements KeyListener, MouseListener, MouseMotionListe
     private final Cursor hiddenCursor;
     private final Cursor normalCursor;
     private Robot robot;
-    private boolean captured;
-    private boolean warping;
+    private volatile boolean captured;
+    private boolean lostFocus;
     private int mouseDX, mouseDY, wheel;
+    private int previousMouseX, previousMouseY;
+    private boolean mousePositionKnown;
 
     public Input(Canvas canvas) {
         this.canvas = canvas;
         this.normalCursor = canvas.getCursor();
-        BufferedImage blank = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
-        this.hiddenCursor = Toolkit.getDefaultToolkit().createCustomCursor(blank, new Point(0, 0), "hidden");
-        try { robot = new Robot(); } catch (AWTException | SecurityException ignored) { robot = null; }
+        if (GraphicsEnvironment.isHeadless()) {
+            hiddenCursor = normalCursor;
+        } else {
+            BufferedImage blank = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
+            hiddenCursor = Toolkit.getDefaultToolkit().createCustomCursor(blank, new Point(0, 0), "hidden");
+            try { robot = new Robot(); } catch (AWTException | SecurityException ignored) { robot = null; }
+        }
         canvas.addKeyListener(this);
         canvas.addMouseListener(this);
         canvas.addMouseMotionListener(this);
@@ -73,27 +80,30 @@ public final class Input implements KeyListener, MouseListener, MouseMotionListe
     public synchronized int consumeMouseDY() { int v = mouseDY; mouseDY = 0; return v; }
     public synchronized int consumeWheel() { int v = wheel; wheel = 0; return v; }
     public synchronized boolean isCaptured() { return captured; }
+    public synchronized boolean consumeFocusLost() { boolean v=lostFocus; lostFocus=false; return v; }
 
     public void setCaptured(boolean value) {
         synchronized (this) {
             captured = value;
+            if(value) lostFocus=false;
+            clear();
             mouseDX = mouseDY = 0;
-            for (int i = 0; i < mouse.length; i++) mouse[i] = mousePressed[i] = false;
+            wheel = 0; mousePositionKnown = false;
         }
-        canvas.setCursor(value ? hiddenCursor : normalCursor);
-        if (value) {
-            canvas.requestFocusInWindow();
-            recenter();
-        }
+        Runnable updateCursor = () -> {
+            canvas.setCursor(captured ? hiddenCursor : normalCursor);
+            if (captured) { canvas.requestFocusInWindow(); recenter(); }
+        };
+        if (SwingUtilities.isEventDispatchThread()) updateCursor.run();
+        else SwingUtilities.invokeLater(updateCursor);
     }
 
-    private void recenter() {
-        if (!captured || robot == null || !canvas.isShowing() || warping) return;
+    private synchronized void recenter() {
+        if (!captured || robot == null || !canvas.isShowing()) return;
         try {
             Point p = canvas.getLocationOnScreen();
-            warping = true;
             robot.mouseMove(p.x + canvas.getWidth() / 2, p.y + canvas.getHeight() / 2);
-        } catch (IllegalStateException ignored) { warping = false; }
+        } catch (IllegalStateException ignored) { /* Window may have closed between focus events. */ }
     }
 
     @Override public synchronized void keyPressed(KeyEvent e) {
@@ -111,7 +121,7 @@ public final class Input implements KeyListener, MouseListener, MouseMotionListe
     @Override public void keyTyped(KeyEvent e) {}
 
     @Override public void mousePressed(MouseEvent e) {
-        if (!captured) { setCaptured(true); return; }
+        canvas.requestFocusInWindow();
         synchronized (this) {
             int b = e.getButton();
             if (b >= 0 && b < mouse.length) { mouse[b] = true; mousePressed[b] = true; }
@@ -123,19 +133,19 @@ public final class Input implements KeyListener, MouseListener, MouseMotionListe
         if (b >= 0 && b < mouse.length) mouse[b] = false;
     }
 
-    @Override public void mouseMoved(MouseEvent e) {
+    @Override public synchronized void mouseMoved(MouseEvent e) {
         if (!captured) return;
         int cx = canvas.getWidth() / 2, cy = canvas.getHeight() / 2;
         int dx = e.getX() - cx, dy = e.getY() - cy;
-        synchronized (this) {
-            if (warping && Math.abs(dx) <= 2 && Math.abs(dy) <= 2) {
-                warping = false;
-                return;
-            }
-            mouseDX += dx;
-            mouseDY += dy;
+        if (robot == null) {
+            dx = mousePositionKnown ? e.getX() - previousMouseX : 0;
+            dy = mousePositionKnown ? e.getY() - previousMouseY : 0;
+            previousMouseX=e.getX(); previousMouseY=e.getY(); mousePositionKnown=true;
+        } else {
+            if (dx == 0 && dy == 0) return;
         }
-        if (robot != null) SwingUtilities.invokeLater(this::recenter);
+        mouseDX += dx; mouseDY += dy;
+        if (robot != null) recenter();
     }
 
     @Override public void mouseDragged(MouseEvent e) { mouseMoved(e); }
@@ -144,7 +154,10 @@ public final class Input implements KeyListener, MouseListener, MouseMotionListe
     @Override public void mouseEntered(MouseEvent e) {}
     @Override public void mouseExited(MouseEvent e) {}
     @Override public void focusGained(FocusEvent e) {}
-    @Override public void focusLost(FocusEvent e) { setCaptured(false); clear(); }
+    @Override public void focusLost(FocusEvent e) {
+        synchronized (this) { lostFocus = true; }
+        setCaptured(false);
+    }
 
     private synchronized void clear() {
         for (int i = 0; i < keys.length; i++) keys[i] = pressed[i] = false;

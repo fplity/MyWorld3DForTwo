@@ -1,8 +1,5 @@
 package com.myworld3d;
 
-import java.util.HashMap;
-import java.util.Map;
-
 /** The complete block palette. IDs are stable because they are written to save files. */
 public enum Block {
     AIR(0, "空气", 0x000000, false, false, 0.0, false),
@@ -28,8 +25,7 @@ public enum Block {
             LEAVES, COAL_ORE, IRON_ORE, GOLD_ORE, FLOWER, MYSTERY
     };
 
-    private static final Map<Integer, Block> BY_ID = new HashMap<>();
-    static { for (Block block : values()) BY_ID.put(block.id, block); }
+    private static final Block[] BY_ID = values();
 
     public final int id;
     public final String displayName;
@@ -50,6 +46,7 @@ public enum Block {
         this.placeable = placeable;
     }
 
-    public static Block fromId(int id) { return BY_ID.getOrDefault(id, AIR); }
+    public static boolean validId(int id) { return id >= 0 && id < BY_ID.length; }
+    public static Block fromId(int id) { return validId(id) ? BY_ID[id] : AIR; }
     public boolean isRenderable() { return this != AIR; }
 }

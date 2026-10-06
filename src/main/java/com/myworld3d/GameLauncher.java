@@ -23,9 +23,11 @@ public final class GameLauncher {
             frame.setIconImage(createIcon());
             frame.addWindowListener(new WindowAdapter() {
                 @Override public void windowClosing(WindowEvent e) {
-                    game.shutdown();
-                    frame.dispose();
-                    System.exit(0);
+                    frame.setEnabled(false);
+                    new Thread(() -> {
+                        game.shutdown();
+                        SwingUtilities.invokeLater(() -> { frame.dispose(); System.exit(0); });
+                    }, "myworld3d-close").start();
                 }
             });
             frame.setVisible(true);

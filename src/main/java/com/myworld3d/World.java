@@ -17,18 +17,23 @@ public final class World {
     public final int shrineX;
     public final int shrineZ;
     private final byte[] blocks;
+    private final int[] surfaceCache;
 
     public World(long seed) { this(DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_DEPTH, seed, true); }
 
     public World(int width, int height, int depth, long seed, boolean generate) {
-        if (width < 8 || height < 8 || depth < 8) throw new IllegalArgumentException("世界尺寸太小");
+        if (width < 8 || height < 8 || depth < 8 || width > 256 || height > 128 || depth > 256)
+            throw new IllegalArgumentException("世界尺寸超出允许范围");
+        if (generate && height < 20) throw new IllegalArgumentException("生成地形需要至少 20 格高度");
         this.width = width;
         this.height = height;
         this.depth = depth;
         this.seed = seed;
         this.blocks = new byte[width * height * depth];
-        this.shrineX = Math.min(width - 9, width / 2 + 27);
-        this.shrineZ = Math.min(depth - 9, depth / 2 + 20);
+        this.surfaceCache = new int[width * depth];
+        Arrays.fill(surfaceCache, -1);
+        this.shrineX = clamp(width / 2 + 27, 3, width - 4);
+        this.shrineZ = clamp(depth / 2 + 20, 3, depth - 4);
         if (generate) generate();
     }
 
@@ -43,7 +48,10 @@ public final class World {
     }
 
     public void set(int x, int y, int z, Block block) {
-        if (inBounds(x, y, z)) blocks[index(x, y, z)] = (byte) block.id;
+        if (inBounds(x, y, z)) {
+            blocks[index(x, y, z)] = (byte) block.id;
+            surfaceCache[z * width + x] = -1;
+        }
     }
 
     public byte[] copyBlocks() { return Arrays.copyOf(blocks, blocks.length); }
@@ -51,15 +59,18 @@ public final class World {
     public void replaceBlocks(byte[] data) {
         if (data.length != blocks.length) throw new IllegalArgumentException("存档世界尺寸不匹配");
         System.arraycopy(data, 0, blocks, 0, data.length);
+        Arrays.fill(surfaceCache, -1);
     }
 
     public int surfaceY(int x, int z) {
         if (x < 0 || x >= width || z < 0 || z >= depth) return 1;
+        int column = z * width + x;
+        if (surfaceCache[column] >= 0) return surfaceCache[column];
         for (int y = height - 2; y >= 1; y--) {
             Block b = get(x, y, z);
-            if (b.solid && b != Block.LEAVES && b != Block.WOOD) return y;
+            if (b.solid && b != Block.LEAVES && b != Block.WOOD) return surfaceCache[column] = y;
         }
-        return 1;
+        return surfaceCache[column] = 1;
     }
 
     private void generate() {
@@ -94,9 +105,9 @@ public final class World {
 
     private Block chooseRock(Random random, int y, int top) {
         double r = random.nextDouble();
-        if (y < top - 5 && r < 0.018) return Block.COAL_ORE;
-        if (y < 15 && r < 0.010) return Block.IRON_ORE;
         if (y < 10 && r < 0.0035) return Block.GOLD_ORE;
+        if (y < 15 && r < 0.0135) return Block.IRON_ORE;
+        if (y < top - 5 && r < 0.0315) return Block.COAL_ORE;
         return Block.STONE;
     }
 
@@ -188,10 +199,12 @@ public final class World {
 
     private void clearSpawn() {
         int sx = width / 2, sz = depth / 2;
-        int sy = surfaceY(sx, sz);
+        int sy = Math.min(height - 4, Math.max(SEA_LEVEL + 2, surfaceY(sx, sz)));
         for (int x = sx - 2; x <= sx + 2; x++) {
             for (int z = sz - 2; z <= sz + 2; z++) {
-                for (int y = sy + 1; y <= sy + 5; y++) set(x, y, z, Block.AIR);
+                for (int y = surfaceY(x, z) + 1; y < sy; y++) set(x, y, z, Block.DIRT);
+                set(x, sy, z, Block.GRASS);
+                for (int y = sy + 1; y < height; y++) set(x, y, z, Block.AIR);
             }
         }
     }
@@ -200,8 +213,22 @@ public final class World {
                            double maxDistance, RaycastHit out) {
         out.clear(maxDistance);
         double length = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (length < 1e-9) return out;
+        if (!Double.isFinite(length) || length < 1e-9 || maxDistance <= 0) return out;
         dx /= length; dy /= length; dz /= length;
+        return castNormalized(ox, oy, oz, dx, dy, dz, maxDistance, out, false);
+    }
+
+    public RaycastHit castIgnoringLiquids(double ox, double oy, double oz, double dx, double dy, double dz,
+                                         double maxDistance, RaycastHit out) {
+        double length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (!Double.isFinite(length) || length < 1e-9 || maxDistance <= 0) { out.clear(maxDistance); return out; }
+        return castNormalized(ox, oy, oz, dx/length, dy/length, dz/length, maxDistance, out, true);
+    }
+
+    // Renderer has pre-normalized rays; avoid a second square root per pixel.
+    RaycastHit castNormalized(double ox, double oy, double oz, double dx, double dy, double dz,
+                             double maxDistance, RaycastHit out, boolean ignoreLiquids) {
+        out.clear(maxDistance);
 
         int x = fastFloor(ox), y = fastFloor(oy), z = fastFloor(oz);
         int stepX = dx >= 0 ? 1 : -1, stepY = dy >= 0 ? 1 : -1, stepZ = dz >= 0 ? 1 : -1;
@@ -213,10 +240,11 @@ public final class World {
         double maxZ = dz == 0 ? Double.POSITIVE_INFINITY : ((stepZ > 0 ? z + 1 - oz : oz - z) * deltaZ);
         int nx = 0, ny = 0, nz = 0;
         double distance = 0.0;
+        boolean startsUnderwater = get(x, y, z) == Block.WATER;
 
         for (int steps = 0; steps < 256 && distance <= maxDistance; steps++) {
             Block block = get(x, y, z);
-            if (block.isRenderable()) {
+            if (block.isRenderable() && !(block.liquid && (ignoreLiquids || startsUnderwater))) {
                 out.hit = true;
                 out.x = x; out.y = y; out.z = z;
                 out.normalX = nx; out.normalY = ny; out.normalZ = nz;
@@ -234,7 +262,8 @@ public final class World {
             } else {
                 z += stepZ; distance = maxZ; maxZ += deltaZ; nx = 0; ny = 0; nz = -stepZ;
             }
-            if (y >= height + 2 || x < -1 || z < -1 || x > width || z > depth) break;
+            if ((y >= height && dy >= 0) || (x < 0 && dx <= 0) || (z < 0 && dz <= 0)
+                    || (x >= width && dx >= 0) || (z >= depth && dz >= 0)) break;
         }
         return out;
     }

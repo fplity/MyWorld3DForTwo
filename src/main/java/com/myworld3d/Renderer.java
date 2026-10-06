@@ -19,14 +19,23 @@ public final class Renderer {
     private final int[] pixels = ((DataBufferInt) image.getRaster().getDataBuffer()).getData();
     private final float[] depth = new float[INTERNAL_WIDTH * INTERNAL_HEIGHT];
     private final RaycastHit scratch = new RaycastHit();
+    private final double[] screenX = new double[INTERNAL_WIDTH];
+    private final double[] screenY = new double[INTERNAL_HEIGHT];
+    private final double[] rayScale = new double[INTERNAL_WIDTH * INTERNAL_HEIGHT];
 
-    public Renderer(World world) { this.world = world; }
+    public Renderer(World world) {
+        this.world = world;
+        double tanHalf=Math.tan(FOV/2), aspect=INTERNAL_WIDTH/(double)INTERNAL_HEIGHT;
+        for(int x=0;x<INTERNAL_WIDTH;x++) screenX[x]=((x+.5)*2/INTERNAL_WIDTH-1)*tanHalf*aspect;
+        for(int y=0;y<INTERNAL_HEIGHT;y++) screenY[y]=(1-(y+.5)*2/INTERNAL_HEIGHT)*tanHalf;
+        for(int y=0;y<INTERNAL_HEIGHT;y++)for(int x=0;x<INTERNAL_WIDTH;x++)
+            rayScale[y*INTERNAL_WIDTH+x]=Math.sqrt(1+screenX[x]*screenX[x]+screenY[y]*screenY[y]);
+    }
     public BufferedImage image() { return image; }
 
     public void render(Player player, double time, boolean rainy, RaycastHit target,
                        List<Creature> creatures, double secretGlow) {
         final int w = INTERNAL_WIDTH, h = INTERNAL_HEIGHT;
-        final double aspect = w / (double) h;
         final double tanHalf = Math.tan(FOV / 2.0);
         final double sinYaw = Math.sin(player.yaw), cosYaw = Math.cos(player.yaw);
         final double sinPitch = Math.sin(player.pitch), cosPitch = Math.cos(player.pitch);
@@ -38,16 +47,16 @@ public final class Renderer {
         final int fogColor = skyColor(0.02, fx, fy, fz, daylight, sunAngle, rainy, secretGlow);
 
         for (int py = 0; py < h; py++) {
-            double screenY = (1.0 - (py + 0.5) * 2.0 / h) * tanHalf;
+            double sy = screenY[py];
             for (int px = 0; px < w; px++) {
-                double screenX = ((px + 0.5) * 2.0 / w - 1.0) * tanHalf * aspect;
-                double dx = fx + rx * screenX + ux * screenY;
-                double dy = fy + ry * screenX + uy * screenY;
-                double dz = fz + rz * screenX + uz * screenY;
-                double inv = 1.0 / Math.sqrt(dx*dx + dy*dy + dz*dz);
-                dx *= inv; dy *= inv; dz *= inv;
                 int index = py * w + px;
-                world.cast(player.x, player.cameraY(), player.z, dx, dy, dz, MAX_DISTANCE, scratch);
+                double sx=screenX[px];
+                double dx = fx + rx * sx + ux * sy;
+                double dy = fy + ry * sx + uy * sy;
+                double dz = fz + rz * sx + uz * sy;
+                double inv = 1.0 / rayScale[index];
+                dx *= inv; dy *= inv; dz *= inv;
+                world.castNormalized(player.x, player.cameraY(), player.z, dx, dy, dz, MAX_DISTANCE, scratch, false);
                 if (!scratch.hit) {
                     pixels[index] = skyColor(dy, dx, dy, dz, daylight, sunAngle, rainy, secretGlow);
                     depth[index] = (float) MAX_DISTANCE;
@@ -94,8 +103,9 @@ public final class Renderer {
         color = multiply(color, light + variation);
 
         if (target != null && target.hit && target.x == hit.x && target.y == hit.y && target.z == hit.z) {
-            double lx = fractional(hit.worldX), ly = fractional(hit.worldY), lz = fractional(hit.worldZ);
-            double edge = Math.min(Math.min(Math.min(lx, 1-lx), Math.min(ly, 1-ly)), Math.min(lz, 1-lz));
+            double u = fractional(hit.normalX!=0 ? hit.worldZ : hit.worldX);
+            double v = fractional(hit.normalY!=0 ? hit.worldZ : hit.worldY);
+            double edge = Math.min(Math.min(u,1-u), Math.min(v,1-v));
             if (edge < 0.035) color = mix(color, 0xFFFFFF, 0.80);
             else color = multiply(color, 1.08);
         }
@@ -115,7 +125,8 @@ public final class Renderer {
         double sunX = Math.cos(sunAngle), sunY = Math.sin(sunAngle), sunZ = 0.18;
         double sunInv = 1.0 / Math.sqrt(sunX*sunX + sunY*sunY + sunZ*sunZ);
         double sunDot = dx*sunX*sunInv + dy*sunY*sunInv + dz*sunZ*sunInv;
-        if (sunDot > 0.9965) color = mix(color, daylight > .35 ? 0xFFF3A3 : 0xE5E9FF, 0.95);
+        if (-sunDot > 0.997 && daylight < .38) color = mix(color, 0xE5E9FF, .95);
+        else if (sunDot > 0.9965 && sunY > 0) color = mix(color, 0xFFF3A3, 0.95);
         else if (sunDot > 0.988) color = mix(color, 0xFFD991, (sunDot - .988) * 45 * daylight);
 
         if (daylight < 0.38 && dy > -0.05) {
@@ -139,6 +150,7 @@ public final class Renderer {
         int w = INTERNAL_WIDTH, h = INTERNAL_HEIGHT;
         double focal = h / (2.0 * tanHalf);
         for (Creature c : creatures) {
+            if(c.health<=0 || (c.kind==Creature.Kind.FIREFLY && daylight>.38)) continue;
             double relX = c.x - player.x;
             double relY = c.y + c.height() * .5 - player.cameraY();
             double relZ = c.z - player.z;
@@ -181,9 +193,10 @@ public final class Renderer {
                             multiply(((x+y)&1)==0 ? 0x6CD85D : 0x53BA4B, .35 + daylight*.65);
                 }
                 int index = y*INTERNAL_WIDTH+x;
-                if (inside && z < depth[index]) {
+                float distance=(float)(z*rayScale[index]);
+                if (inside && distance < depth[index]) {
                     pixels[index] = color;
-                    depth[index] = z;
+                    depth[index] = distance;
                 }
             }
         }

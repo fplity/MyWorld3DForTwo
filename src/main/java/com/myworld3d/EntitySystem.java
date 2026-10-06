@@ -90,7 +90,7 @@ public final class EntitySystem {
     }
 
     public Creature aimedCreature(World world, Player player, double maxDistance) {
-        RaycastHit blockHit = world.cast(player.x, player.cameraY(), player.z,
+        RaycastHit blockHit = world.castIgnoringLiquids(player.x, player.cameraY(), player.z,
                 player.lookX(), player.lookY(), player.lookZ(), maxDistance, new RaycastHit());
         double blockDistance = blockHit.hit ? blockHit.distance : maxDistance;
         return creatures.stream().filter(c -> c.kind == Creature.Kind.SLIME).filter(c -> {
@@ -103,14 +103,14 @@ public final class EntitySystem {
     }
 
     public boolean attack(Creature creature, Inventory inventory) {
-        if (creature == null) return false;
+        if (creature == null || creature.kind != Creature.Kind.SLIME || creature.health <= 0) return false;
         creature.health--;
         if (creature.health <= 0) inventory.add(random.nextBoolean() ? Block.COAL_ORE : Block.GLOW, 1);
         return true;
     }
 
     private void spawnSlime(World world) {
-        int x = 4 + random.nextInt(world.width - 8), z = 4 + random.nextInt(world.depth - 8);
+        int x = 3 + random.nextInt(Math.max(1, world.width - 6)), z = 3 + random.nextInt(Math.max(1, world.depth - 6));
         creatures.add(new Creature(Creature.Kind.SLIME, x + .5, world.surfaceY(x,z)+1.02, z+.5, random.nextDouble()*8));
     }
 
