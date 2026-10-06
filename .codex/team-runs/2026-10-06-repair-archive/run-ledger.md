@@ -33,3 +33,6 @@
 - 自测证据：`evidence/verification.md` 和四张真实窗口截图。没有独立 tester，故不标记为团队 ACCEPTED。
 - 性能：同种子同镜头两轮基准，原版中位约 20ms，优化版约 12.5ms；保留实际限制。
 - REMOTE_READY：源码、JAR、原世界归档、更新文档和证据准备提交；上传后执行完整远程核验，再考虑本地清理。
+- REMOTE_VERIFIED：已推送整合提交 `0949753076c67912f1fd06c5c11e8a8951fe6b9b`。从远程 fresh clone 核验 36 个文件的路径、模式与 blob 哈希完全一致，JAR 与原世界 SHA-256 匹配；fresh clone 再运行 23 组回归全部通过。
+- 远程默认分支 main，私有仓库。无工作区未提交修改、无项目内 ReparsePoint。
+- CLEANUP_READY：用户已明确授权成功上传后删除整个指定本地项目；本条是删除前状态，实际删除结果由最终交付消息和外置项目主记忆保存。

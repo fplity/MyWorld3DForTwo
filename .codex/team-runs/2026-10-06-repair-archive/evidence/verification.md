@@ -44,6 +44,12 @@
 - 原档归档：602,279 字节；SHA-256 `0F95B86EF84D8202FBD3E4F60BAAB6867D9FC7964C1191B4D97617F937EDCB4A`。
 - 后续远程克隆和提交/文件核验结果记入运行账本；本证据未将尚未执行的删除记成通过。
 
+## 远程恢复核验
+
+`git clone --branch main --single-branch https://github.com/fplity/MyWorld3DForTwo.git out/remote-verification` 成功。整合提交 `0949753076c67912f1fd06c5c11e8a8951fe6b9b` 的 36 个文件路径、Git 模式与 blob 摘要与本地完全一致；远程 JAR 和玩家世界 SHA-256 与上表一致。
+
+在 fresh clone 中独立构建并运行 `test.ps1`，退出 0，23 组通过。此后仅补充这份远程核验记录及账本，产品代码与已验证 JAR 不变。最终文档提交推送后再比对远程提交与文件树，才执行本地清理。
+
 ## 截图
 
 ![主菜单](menu-1280.png)
